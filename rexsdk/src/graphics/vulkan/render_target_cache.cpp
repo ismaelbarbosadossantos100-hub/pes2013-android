@@ -2608,7 +2608,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
   std::vector<std::vector<spv::Decoration>> main_precisions;
   spv::Block* main_entry;
   spv::Function* main_function = builder.makeFunctionEntry(
-      spv::NoPrecision, type_void, "main", main_param_types, main_precisions, {}, &main_entry);
+      spv::NoPrecision, type_void, "main", spv::LinkageTypeMax,
+      main_param_types, main_precisions, &main_entry);
 
   // Working with unsigned numbers for simplicity now, bitcasting to signed will
   // be done at texture fetch.
@@ -5508,7 +5509,8 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
   std::vector<std::vector<spv::Decoration>> main_precisions;
   spv::Block* main_entry;
   spv::Function* main_function = builder.makeFunctionEntry(
-      spv::NoPrecision, type_void, "main", main_param_types, main_precisions, {}, &main_entry);
+      spv::NoPrecision, type_void, "main", spv::LinkageTypeMax,
+      main_param_types, main_precisions, &main_entry);
 
   // For now, as the exact addressing in 64bpp render targets relatively to
   // 32bpp is unknown, treating 64bpp tiles as storing 40x16 samples rather than

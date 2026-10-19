@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = "org.libsdl.app"
+    compileSdk = 34
+    ndkVersion = "26.2.11394342"
+
+    defaultConfig {
+        applicationId = "com.tokyogames.pes2013"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 1
+        versionName = "0.1.0-recomp"
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_PLATFORM=android-26",
+                          "-DANDROID_STL=c++_static",
+                          "-DPES2013_ROOT=${project.rootDir.absolutePath}/../pes2013",
+                          "-DREXSDK_DIR=${project.rootDir.absolutePath}/../rexsdk"
+                abiFilters "arm64-v8a"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.28.3"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        abortOnError = false
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+}

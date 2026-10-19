@@ -1,0 +1,82 @@
+# manual_functions.toml — PES 2013 / ReXGlue
+#
+# Versão FINAL VALIDADA (2026-10-19)
+# default.xex SHA-256: 8b01e24965e7f527388fee056d54a6007cfdbe56fd4c0153094af8be9f71b0b5
+#
+# Todos os tamanhos foram extraídos e validados instrução por instrução
+# diretamente dos bytes PPC decifrados do default.xex usando Capstone.
+
+# =============================================================================
+# 1. Alvos de UnresolvedCall do codegen.log (todos confirmados por bytes)
+# =============================================================================
+
+# Thunk: b 0x82c4b908
+[functions."0x82C4C440"]
+size = 0x4
+name = "sub_82C4C440_thunk"
+
+# Função completa com bloco condicional e bctr em 0x828C6A50 (padding 0x828C6A54)
+# O branch interno 0x828C6A20 -> 0x828C6A0C fica perfeitamente contido neste intervalo.
+[functions."0x828C6A00"]
+size = 0x54
+
+# Função folha terminada em blr 0x82A31F44
+[functions."0x82A31F30"]
+size = 0x18
+
+# Thunk: lwz r3, 0x260(r3); b 0x82f63b48
+[functions."0x82F5D000"]
+size = 0x8
+
+# Função com tail call b 0x828babb0 em 0x82E80CCC
+[functions."0x82E80CC0"]
+size = 0x10
+
+# Função matemática de interpolação terminada em blr 0x823EAC3C
+[functions."0x823EABC0"]
+size = 0x80
+
+# Função completa até 0x829736EC (b 0x829736c0) e blr 0x829736E4
+# NOTA: 0x829736C0 é um bloco interno desta função, NÃO deve ser declarada como raiz.
+[functions."0x82973608"]
+size = 0xE8
+
+# Função de desreferenciamento com beqlr 0x82A32A60 e bctr 0x82A32A70 + blr 0x82A32A74
+[functions."0x82A32A58"]
+size = 0x20
+
+# =============================================================================
+# 2. Inicializadores estáticos CRT (tabela 0x83260010..0x83268544)
+# =============================================================================
+# Cada uma destas funções fica logo após um `bl 0x821b13e0` (throw, noreturn)
+# de uma função com .pdata, sem entrada própria de .pdata.
+
+[functions."0x831DE0D0"]
+size = 0x28     # slot 0x83266F7C (crash original documentado)
+
+[functions."0x831DE338"]
+size = 0x0C     # slot 0x83266FB0 (tail call para sub_82A10528)
+
+[functions."0x831DE480"]
+size = 0x0C     # slot 0x83266FC0 (tail call para sub_82A10528)
+
+[functions."0x831E24E8"]
+size = 0x0C     # slot 0x83267038 (tail call para sub_82A10528)
+
+[functions."0x831E28A0"]
+size = 0x28     # slot 0x83267074
+
+[functions."0x831E48E8"]
+size = 0x34     # slot 0x832671DC (loop de zeramento + tail call para sub_82A10528)
+
+[functions."0x831E9B18"]
+size = 0x28     # slot 0x832677F0
+
+[functions."0x831EAD08"]
+size = 0x28     # slot 0x832679A0
+
+[functions."0x831EC808"]
+size = 0x28     # slot 0x83267C5C
+
+[functions."0x831EFDB8"]
+size = 0x0C     # slot 0x83267D94 (tail call para sub_82A10528)

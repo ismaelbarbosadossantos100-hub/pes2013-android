@@ -1,0 +1,216 @@
+name: Build PES 2013 Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      NDK_VERSION: "26.2.11394342"
+      ANDROID_API: "26"
+      JAVA_VERSION: "17"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+
+      - name: Set up Android SDK command-line tools
+        run: |
+          set -e
+          # Ubuntu 22.04 ships SDK tools at a known location
+          CMDLINE_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          SDK_ROOT="$HOME/android-sdk"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          curl -fsSL "$CMDLINE_URL" -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-unzip
+          mv /tmp/cmdline-unzip/cmdline-tools "$SDK_ROOT/cmdline-tools/latest"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$SDK_ROOT"     >> $GITHUB_ENV
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$SDK_ROOT/platform-tools"            >> $GITHUB_PATH
+
+      - name: Accept SDK licenses
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -e
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;${{ env.NDK_VERSION }}" \
+            "platforms;android-${{ env.ANDROID_API }}" \
+            "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build python3 python3-pip \
+            nasm yasm pkg-config \
+            libvulkan-dev \
+            clang lld
+
+      - name: Cache thirdparty clones
+        id: cache-tp
+        uses: actions/cache@v4
+        with:
+          path: |
+            rexsdk/thirdparty/FFmpeg
+            rexsdk/thirdparty/sdl3
+            rexsdk/thirdparty/simde
+            rexsdk/thirdparty/glslang
+            rexsdk/thirdparty/vulkan-headers
+            rexsdk/thirdparty/vulkan-loader
+            rexsdk/thirdparty/vulkan-memory-allocator
+            rexsdk/thirdparty/spirv-headers
+            rexsdk/thirdparty/spirv-tools
+            rexsdk/thirdparty/tracy
+            rexsdk/thirdparty/fmt
+            rexsdk/thirdparty/spdlog
+            rexsdk/thirdparty/catch2
+            rexsdk/thirdparty/moltenvk
+          key: rexsdk-tp-v4-${{ runner.os }}
+
+      - name: Clone large thirdparty deps (if not cached)
+        if: steps.cache-tp.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}/rexsdk
+        run: |
+          set -e
+          mkdir -p thirdparty
+          cd thirdparty
+          clone_if_missing() {
+            local name=$1 url=$2 tag=$3
+            [ -d "$name" ] && return 0
+            echo "==> Cloning $name ($tag)..."
+            git clone --depth=1 ${tag:+--branch "$tag"} "$url" "$name" 2>&1 | tail -2
+          }
+          clone_if_missing FFmpeg         https://github.com/FFmpeg/FFmpeg                    n6.1
+          clone_if_missing sdl3           https://github.com/libsdl-org/SDL                   release-3.2.x
+          clone_if_missing simde          https://github.com/simd-everywhere/simde             v0.8.2
+          clone_if_missing glslang        https://github.com/KhronosGroup/glslang              vulkan-sdk-1.3.268.0
+          clone_if_missing vulkan-headers https://github.com/KhronosGroup/Vulkan-Headers       vulkan-sdk-1.3.268.0
+          clone_if_missing vulkan-loader  https://github.com/KhronosGroup/Vulkan-Loader        vulkan-sdk-1.3.268.0
+          clone_if_missing vulkan-memory-allocator \
+                                          https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator v3.0.1
+          clone_if_missing spirv-headers  https://github.com/KhronosGroup/SPIRV-Headers        vulkan-sdk-1.3.268.0
+          clone_if_missing spirv-tools    https://github.com/KhronosGroup/SPIRV-Tools          vulkan-sdk-1.3.268.0
+          clone_if_missing tracy          https://github.com/wolfpld/tracy                     v0.10
+          clone_if_missing fmt            https://github.com/fmtlib/fmt                        10.1.1
+          clone_if_missing spdlog         https://github.com/gabime/spdlog                     v1.12.0
+          clone_if_missing catch2         https://github.com/catchorg/Catch2                   v3.4.0
+          clone_if_missing moltenvk       https://github.com/KhronosGroup/MoltenVK             v1.2.9
+          echo "All clones done."
+          ls -la
+
+      - name: Set workspace paths
+        run: |
+          echo "PES2013_ROOT=${{ github.workspace }}/pes2013"  >> $GITHUB_ENV
+          echo "REXSDK_DIR=${{ github.workspace }}/rexsdk"     >> $GITHUB_ENV
+
+      - name: Verify layout
+        run: |
+          echo "--- PES2013 generated dir ---"
+          ls "$PES2013_ROOT/generated/default/" | head -10
+          echo "(total $(ls "$PES2013_ROOT/generated/default/" | wc -l) files)"
+          echo "--- REXSDK include ---"
+          ls "$REXSDK_DIR/include/" | head -10
+          echo "--- REXSDK thirdparty ---"
+          ls "$REXSDK_DIR/thirdparty/" | head -20
+          echo "--- Android gradle wrapper ---"
+          ls "${{ github.workspace }}/android/gradle/wrapper/"
+
+      - name: Make gradlew executable
+        run: chmod +x "${{ github.workspace }}/android/gradlew"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/gradle-wrapper.properties') }}
+
+      - name: Build debug APK
+        working-directory: ${{ github.workspace }}/android
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_HOME:     ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          PES2013_ROOT:     ${{ env.PES2013_ROOT }}
+          REXSDK_DIR:       ${{ env.REXSDK_DIR }}
+          GRADLE_OPTS:      "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx6g"
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          echo "GRADLE_EXIT=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Find APK
+        if: always()
+        id: find_apk
+        run: |
+          APK=$(find "${{ github.workspace }}/android" -name "*.apk" 2>/dev/null | head -1)
+          if [ -n "$APK" ]; then
+            echo "path=$APK"  >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            ls -lh "$APK"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No APK produced."
+          fi
+
+      - name: Upload APK artifact
+        if: steps.find_apk.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pes2013-debug-apk-build${{ github.run_number }}
+          path: ${{ steps.find_apk.outputs.path }}
+          retention-days: 60
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            ${{ github.workspace }}/android/build.log
+            ${{ github.workspace }}/android/app/build/intermediates/cmake/debug/cmake_build_output.txt
+
+      - name: Create GitHub Release
+        if: steps.find_apk.outputs.found == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "build-${{ github.run_number }}"
+          name: "PES 2013 Android — Build #${{ github.run_number }}"
+          body: |
+            ## PES 2013 Android (ReXGlue native recompilation)
+
+            **Build**: #${{ github.run_number }}
+            **Commit**: ${{ github.sha }}
+
+            ### Como instalar
+            1. Habilite *Fontes desconhecidas* no Android
+            2. Instale o APK
+            3. Toque em **SELECIONAR PASTA** e escolha a pasta com `default.xex`
+            4. Toque em **PLAY**
+
+            ### Hardware alvo
+            - SoC: MediaTek Helio G99
+            - GPU: Mali-G57 MC2
+            - ABI: arm64-v8a
+            - Android mínimo: 8.0 (API 26)
+          files: ${{ steps.find_apk.outputs.path }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

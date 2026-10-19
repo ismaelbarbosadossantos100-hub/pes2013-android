@@ -198,6 +198,14 @@ if(REXGLUE_USE_VULKAN)
     # VulkanMemoryAllocator
     set(VMA_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
     add_subdirectory(vulkan-memory-allocator)
+    if(NOT TARGET GPUOpen::VulkanMemoryAllocator)
+        if(TARGET VulkanMemoryAllocator)
+            add_library(GPUOpen::VulkanMemoryAllocator ALIAS VulkanMemoryAllocator)
+        else()
+            add_library(GPUOpen::VulkanMemoryAllocator INTERFACE IMPORTED GLOBAL)
+            target_include_directories(GPUOpen::VulkanMemoryAllocator INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-memory-allocator/include")
+        endif()
+    endif()
 
     if(APPLE)
         # Build the loader and MoltenVK revisions shipped by the pinned SDK.

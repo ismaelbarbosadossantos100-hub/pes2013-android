@@ -468,7 +468,7 @@ void SpirvShaderTranslator::StartTranslation() {
   spv::Block* function_main_entry;
   function_main_ =
       builder_->makeFunctionEntry(spv::NoPrecision, type_void_, "main", main_param_types,
-                                  main_precisions, &function_main_entry);
+                                  main_precisions, {}, &function_main_entry);
 
   // Load the flags system constant since it may be used in many places.
   id_vector_temp_.clear();

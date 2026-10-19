@@ -46,6 +46,11 @@
 #include <filesystem>
 #include <string_view>
 
+#if REX_PLATFORM_ANDROID
+#include <rex/memory/utils.h>
+#include <rex/thread.h>
+#endif
+
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
@@ -54,8 +59,13 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
 namespace rex {
 
 // --- ReXApp ---
-
-ReXApp::~ReXApp() = default;
+ 
+ReXApp::~ReXApp() {
+#if REX_PLATFORM_ANDROID
+  rex::thread::AndroidShutdown();
+  rex::memory::AndroidShutdown();
+#endif
+}
 
 ReXApp::ReXApp(ui::WindowedAppContext& ctx, std::string_view name, PPCImageInfo ppc_info,
                std::string_view usage)
@@ -84,6 +94,10 @@ system::AchievementManager& ReXApp::achievements() const {
 }
 
 bool ReXApp::OnInitialize() {
+#if REX_PLATFORM_ANDROID
+  rex::memory::AndroidInitialize();
+  rex::thread::AndroidInitialize();
+#endif
   if (!SetupEnvironment())
     return false;
   if (!SetupPresentation())

@@ -2102,7 +2102,7 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
   spv::Block* main_entry;
   spv::Function* main_function = builder.makeFunctionEntry(
       spv::NoPrecision, type_void, "main", spv::LinkageTypeMax,
-      main_param_types, main_precisions, &main_entry);
+      main_param_types, {}, main_precisions, &main_entry);
   spv::Instruction* entry_point =
       builder.addEntryPoint(spv::ExecutionModelGeometry, main_function, "main");
   for (spv::Id interface_id : main_interface) {

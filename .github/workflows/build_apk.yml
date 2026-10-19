@@ -9,6 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
+    permissions:
+      contents: write
 
     env:
       NDK_VERSION: "26.2.11394342"
@@ -202,6 +204,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.find_apk.outputs.found == 'true'
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "build-${{ github.run_number }}"

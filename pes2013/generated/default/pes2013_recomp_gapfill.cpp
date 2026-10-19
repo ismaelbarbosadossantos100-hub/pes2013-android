@@ -163,16 +163,12 @@ DEFINE_REX_FUNC(sub_82C4C440) {
 DEFINE_REX_FUNC(sub_828C6A00) {
     REX_FUNC_PROLOGUE();
     ctx.r11.u64 = ctx.r4.u64;
-    ctx.cr.cr6.cr0.eq = (ctx.r4.s32 == 0);
-    ctx.cr.cr6.cr0.lt = (ctx.r4.s32 < 0);
-    ctx.cr.cr6.cr0.gt = (ctx.r4.s32 > 0);
-    if (!ctx.cr.cr6.cr0.eq) {
+    ctx.cr0.compare<int32_t>(ctx.r4.s32, 0, ctx.xer);
+    if (!ctx.cr0.eq) {
         ctx.r10.s64 = (int64_t)(int32_t)0x83510000;
         ctx.r3.u64 = REX_LOAD_U32(ctx.r10.u32 - 0x51b4);
-        ctx.cr.cr6.cr0.eq = (ctx.r3.u32 == 0);
-        ctx.cr.cr6.cr0.lt = false;
-        ctx.cr.cr6.cr0.gt = (ctx.r3.u32 > 0);
-        if (!ctx.cr.cr6.cr0.eq) {
+        ctx.cr0.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+        if (!ctx.cr0.eq) {
             ctx.r4.s64 = 1;
             int32_t val = (int32_t)ctx.r11.u32;
             if (val == 3) {
@@ -207,9 +203,11 @@ DEFINE_REX_FUNC(sub_82F5D000) {
 
 DEFINE_REX_FUNC(sub_82E80CC0) {
     REX_FUNC_PROLOGUE();
+    PPCRegister temp;
     ctx.r11.s64 = (int64_t)(int32_t)0x820A0000;
     ctx.r3.u64 = REX_LOAD_U32(ctx.r3.u32 + 0x5c);
-    ctx.f1.f64 = (double)REX_LOAD_F32(ctx.r11.u32 - 0x1828);
+    temp.u32 = REX_LOAD_U32(ctx.r11.u32 - 0x1828);
+    ctx.f1.f64 = double(temp.f32);
     sub_828BABB0(ctx, base);
     return;
 }
@@ -229,6 +227,7 @@ DEFINE_REX_FUNC(sub_82A32A58) {
 
 DEFINE_REX_FUNC(sub_823EABC0) {
     REX_FUNC_PROLOGUE();
+    PPCRegister temp;
     uint8_t flag = REX_LOAD_U8(ctx.r3.u32 + 8);
     uint64_t r11_val = (uint32_t)ctx.r4.u64;
     if (flag != 0) {
@@ -238,21 +237,26 @@ DEFINE_REX_FUNC(sub_823EABC0) {
         ctx.f0.f64 = (double)f_val;
         REX_STORE_U8(ctx.r3.u32 + 8, 0);
     } else {
-        float f0_in = REX_LOAD_F32(ctx.r3.u32 + 0xc);
+        temp.u32 = REX_LOAD_U32(ctx.r3.u32 + 0xc);
+        float f0_in = temp.f32;
         int64_t i13 = (int64_t)r11_val;
         float f13 = (float)(double)i13;
         float f12 = (f0_in <= f13) ? (f13 - f0_in) : (f0_in - f13);
         float f1_in = (float)ctx.f1.f64;
         float f11 = f0_in * f1_in;
-        float f10 = f1_in * REX_LOAD_F32(ctx.r3.u32 + 0x10);
+        temp.u32 = REX_LOAD_U32(ctx.r3.u32 + 0x10);
+        float f10 = f1_in * temp.f32;
         uint32_t r11_addr = 0x82100000 - 0x380c;
-        float const_f0 = REX_LOAD_F32(r11_addr);
+        temp.u32 = REX_LOAD_U32(r11_addr);
+        float const_f0 = temp.f32;
         float term0 = const_f0 - f1_in;
         float st_10 = (term0 * f12) + f10;
-        REX_STORE_F32(ctx.r3.u32 + 0x10, st_10);
+        temp.f32 = st_10;
+        REX_STORE_U32(ctx.r3.u32 + 0x10, temp.u32);
         float st_c = (term0 * f13) + f11;
         ctx.f0.f64 = (double)st_c;
     }
-    REX_STORE_F32(ctx.r3.u32 + 0xc, (float)ctx.f0.f64);
+    temp.f32 = (float)ctx.f0.f64;
+    REX_STORE_U32(ctx.r3.u32 + 0xc, temp.u32);
     return;
 }

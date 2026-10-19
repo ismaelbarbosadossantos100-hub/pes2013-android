@@ -18,6 +18,8 @@ android {
             cmake {
                 arguments "-DANDROID_PLATFORM=android-26",
                           "-DANDROID_STL=c++_static",
+                          "-DREXGLUE_ENABLE_TRACY=OFF",
+                          "-DREXGLUE_ENABLE_PERF_COUNTERS=OFF",
                           "-DPES2013_ROOT=${project.rootDir.absolutePath}/../pes2013",
                           "-DREXSDK_DIR=${project.rootDir.absolutePath}/../rexsdk"
                 abiFilters "arm64-v8a"

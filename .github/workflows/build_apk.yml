@@ -87,7 +87,7 @@ jobs:
             rexsdk/thirdparty/spdlog
             rexsdk/thirdparty/catch2
             rexsdk/thirdparty/moltenvk
-          key: rexsdk-tp-v6-${{ runner.os }}
+          key: rexsdk-tp-v7-${{ runner.os }}
 
       - name: Clone large thirdparty deps (if not cached)
         if: steps.cache-tp.outputs.cache-hit != 'true'
@@ -112,7 +112,7 @@ jobs:
                                           https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator v3.3.0
           clone_if_missing spirv-headers  https://github.com/KhronosGroup/SPIRV-Headers        vulkan-sdk-1.4.357.0
           clone_if_missing spirv-tools    https://github.com/KhronosGroup/SPIRV-Tools          vulkan-sdk-1.4.357.0
-          clone_if_missing tracy          https://github.com/wolfpld/tracy                     v0.10
+          clone_if_missing tracy          https://github.com/wolfpld/tracy                     v0.13.1
           clone_if_missing fmt            https://github.com/fmtlib/fmt                        10.1.1
           clone_if_missing spdlog         https://github.com/gabime/spdlog                     v1.12.0
           clone_if_missing catch2         https://github.com/catchorg/Catch2                   v3.4.0

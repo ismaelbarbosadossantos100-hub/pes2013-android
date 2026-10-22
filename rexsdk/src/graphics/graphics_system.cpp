@@ -10,6 +10,7 @@
  */
 
 #include <rex/graphics/graphics_system.h>
+#include <rex/diag/progress.h>
 
 #include <algorithm>
 #include <cctype>
@@ -298,6 +299,12 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   if (!interrupt_callback_) {
     return;
   }
+  {
+    uint64_t irq_n = rex::diag::counters().interrupts.fetch_add(1, std::memory_order_relaxed);
+    if (irq_n < 3) {
+      REXLOG_INFO("[gpu] graphics interrupt #{} source={} cpu={}", irq_n + 1, source, cpu);
+    }
+  }
 
   auto thread = system::XThread::GetCurrentThread();
   assert_not_null(thread);
@@ -355,7 +362,9 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
         command_processor_->InitializeShaderStorage(cache_root, title_id, true);
         fence.Signal();
       });
+      REXLOG_INFO("[gpu] waiting for shader storage initialization");
       fence.Wait();
+      REXLOG_INFO("[gpu] shader storage initialization done");
     }
   } else {
     command_processor_->CallInThread([this, cache_root, title_id]() {

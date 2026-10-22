@@ -35,16 +35,19 @@ public final class GameActivity extends SDLActivity {
             SessionLogger.log(this, "GAME_ARGUMENTS empty reason=game_root_missing");
             return new String[0];
         }
+        File userData = getExternalFilesDir("user_data");
+        String userArg = "--user_data_root=" + (userData != null ? userData.getAbsolutePath() : getFilesDir().getAbsolutePath());
         String logPath = SessionLogger.currentPath();
         if (logPath == null) {
             SessionLogger.log(this, "GAME_ARGUMENTS game_data_root=" + path +
                     " native_log=unavailable");
-            return new String[] { "--game_data_root=" + path };
+            return new String[] { "--game_data_root=" + path, userArg };
         }
         SessionLogger.log(this, "GAME_ARGUMENTS game_data_root=" + path +
                 " native_log=" + logPath + " vulkan_loader=system_libvulkan.so");
         return new String[] {
                 "--game_data_root=" + path,
+                userArg,
                 "--log_file=" + logPath
         };
     }

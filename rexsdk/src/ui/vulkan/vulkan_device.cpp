@@ -32,11 +32,13 @@ REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, true, "UI
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Apple Silicon / MoltenVK does not expose geometryShader or fillModeNonSolid;
 // default both to false on macOS so the device can still be selected.
-REXCVAR_DEFINE_BOOL(vulkan_require_geometry_shader, !REX_PLATFORM_MAC, "UI/Vulkan",
+REXCVAR_DEFINE_BOOL(vulkan_require_geometry_shader, !REX_PLATFORM_MAC && !REX_PLATFORM_ANDROID,
+                    "UI/Vulkan",
                     "Require geometryShader support for Vulkan GPU emulation (disable to allow "
                     "fallback primitive emulation paths)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC, "UI/Vulkan",
+REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid,
+                    !REX_PLATFORM_MAC && !REX_PLATFORM_ANDROID, "UI/Vulkan",
                     "Require fillModeNonSolid support for Vulkan GPU emulation (disable to "
                     "allow fallback to solid fill for line/point polygon modes)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -117,11 +119,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       return nullptr;
     }
     if (!supported_features.vertexPipelineStoresAndAtomics) {
+      // Not fatal: Mali Valhall GPUs (e.g. Mali-G57) lack it. Guest vertex
+      // shaders without memexport are unaffected (the shared memory buffer is
+      // NonWritable for them); draws using vertex memexport are skipped by the
+      // Vulkan command processor.
       REXLOG_WARN(
-          "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, which "
-          "is required for Vulkan GPU emulation parity",
+          "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics; "
+          "vertex shader memexport draws will be skipped",
           properties.deviceName);
-      return nullptr;
     }
     if (REXCVAR_GET(vulkan_require_geometry_shader) && !supported_features.geometryShader) {
       REXLOG_WARN(

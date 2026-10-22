@@ -17,6 +17,7 @@
 #include <string>
 
 #include <rex/cvar.h>
+#include <rex/diag/progress.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/video_mode_util.h>
@@ -313,6 +314,7 @@ u32 VdEnableDisableClockGating_entry(u32 enabled) {
 }
 
 void VdSetGraphicsInterruptCallback_entry(u32 callback, mapped_void user_data) {
+  REXLOG_INFO("[vd] VdSetGraphicsInterruptCallback callback={:#x}", callback);
   // callback takes 2 params
   // r3 = bool 0/1 - 0 is normal interrupt, 1 is some acquire/lock mumble
   // r4 = user_data (r4 of VdSetGraphicsInterruptCallback)
@@ -326,6 +328,7 @@ void VdSetGraphicsInterruptCallback_entry(u32 callback, mapped_void user_data) {
 }
 
 void VdInitializeRingBuffer_entry(mapped_void ptr, i32 size_log2) {
+  REXLOG_INFO("[vd] VdInitializeRingBuffer size_log2={}", static_cast<int32_t>(size_log2));
   // r3 = result of MmGetPhysicalAddress
   // r4 = log2(size)
   // Buffer pointers are from MmAllocatePhysicalMemory with WRITE_COMBINE.
@@ -445,6 +448,12 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
                   mapped_u32 frontbuffer_ptr,  // ptr to frontbuffer address
                   mapped_u32 texture_format_ptr, mapped_u32 color_space_ptr, mapped_u32 width,
                   mapped_u32 height) {
+  {
+    uint64_t vd_n = rex::diag::counters().vd_swaps.fetch_add(1, std::memory_order_relaxed);
+    if (vd_n < 5) {
+      REXLOG_INFO("[vd] VdSwap #{}", vd_n + 1);
+    }
+  }
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);

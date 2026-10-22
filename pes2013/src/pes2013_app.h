@@ -16,9 +16,15 @@ class Pes2013App : public rex::ReXApp {
         PPCImageConfig));
   }
 
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    // An empty gpu_plugin cvar disables GPU emulation: the SDL surface is
+    // created but no presenter is attached, which shows a black screen.
+    // The Xenos plugin (librexgpu-xenos*.so) is packaged in the APK.
+    config.gpu_plugin = "xenos";
+  }
+
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}
-  // void OnPreSetup(rex::RuntimeConfig& config) override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostLoadXexImage() override {}
   // void OnPostSetup() override {}

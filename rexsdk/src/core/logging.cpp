@@ -33,6 +33,10 @@
 #include <spdlog/sinks/stdout_sinks.h>
 #endif
 
+#if defined(__ANDROID__)
+#include <spdlog/sinks/android_sink.h>
+#endif
+
 REXCVAR_DEFINE_STRING(log_level, "info", "Log",
                       "Global log level: trace, debug, info, warn, error, critical, off")
     .allowed({"trace", "debug", "info", "warn", "error", "critical", "off"});
@@ -103,6 +107,13 @@ std::vector<spdlog::sink_ptr> BuildDefaultSinks() {
     sinks.push_back(g_file_sink);
   for (auto& s : g_extra_sinks)
     sinks.push_back(s);
+#if defined(__ANDROID__)
+  // stdout is discarded for Android apps; mirror runtime logs to logcat so
+  // initialization failures are visible with `adb logcat -s PES2013_RT`.
+  static spdlog::sink_ptr android_sink =
+      std::make_shared<spdlog::sinks::android_sink_mt>("PES2013_RT");
+  sinks.push_back(android_sink);
+#endif
   return sinks;
 }
 

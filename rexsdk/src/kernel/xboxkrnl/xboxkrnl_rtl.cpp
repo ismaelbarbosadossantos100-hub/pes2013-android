@@ -102,6 +102,25 @@ u32 RtlLowerChar_entry(u32 in) {
   return c;
 }
 
+// WCHAR upcase for the ranges the game can hit (ASCII + Latin-1, which covers
+// Portuguese). Other code points are returned unchanged.
+u32 RtlUpcaseUnicodeChar_entry(u32 in) {
+  uint16_t c = static_cast<uint16_t>(in & 0xFFFF);
+  if (c >= 'a' && c <= 'z') {
+    return c - 0x20;
+  }
+  if (c == 0xB5) {
+    return 0x39C;
+  }
+  if (c >= 0xE0 && c <= 0xFE && c != 0xF7) {
+    return c - 0x20;
+  }
+  if (c == 0xFF) {
+    return 0x178;
+  }
+  return c;
+}
+
 u32 RtlCompareString_entry(mapped_string string_1, mapped_string string_2, u32 case_insensitive) {
   int ret = case_insensitive ? rex::string::compare_case(string_1, string_2)
                              : std::strcmp(string_1, string_2);
@@ -586,7 +605,7 @@ REX_EXPORT_STUB(__imp__RtlUnicodeToMultiByteSize);
 REX_EXPORT_STUB(__imp__RtlUnicodeToUtf8);
 REX_EXPORT_STUB(__imp__RtlUnicodeToUtf8Size);
 REX_EXPORT_STUB(__imp__RtlUnwind2);
-REX_EXPORT_STUB(__imp__RtlUpcaseUnicodeChar);
+REX_EXPORT(__imp__RtlUpcaseUnicodeChar, rex::kernel::xboxkrnl::RtlUpcaseUnicodeChar_entry)
 REX_EXPORT_STUB(__imp__RtlVirtualUnwind);
 REX_EXPORT_STUB(__imp__RtlImageDirectoryEntryToData);
 REX_EXPORT_STUB(__imp__RtlCaptureStackBackTrace);

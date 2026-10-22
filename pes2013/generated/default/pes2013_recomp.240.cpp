@@ -17802,10 +17802,12 @@ DEFINE_REX_FUNC(sub_82A31B60) {
 	return;
 }
 
+DECLARE_REX_FUNC(sub_82A31F30);
+// pes2013: the generated body was truncated (see manual_functions.toml for the real
+// extent); delegate to the full gapfill translation of the same guest function.
 DEFINE_REX_FUNC(diag_82A31F30) {
 	REX_FUNC_PROLOGUE();
-	// cmpwi cr6,r4,0
-	ctx.cr6.compare<int32_t>(ctx.r4.s32, 0, ctx.xer);
+	sub_82A31F30(ctx, base);
 }
 
 DEFINE_REX_FUNC(sub_82A327D0) {

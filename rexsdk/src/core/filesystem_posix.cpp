@@ -24,6 +24,10 @@
 #include <mach-o/dyld.h>
 #endif
 
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#endif
+
 #include <rex/assert.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
@@ -91,6 +95,15 @@ std::filesystem::path GetExecutablePath() {
   std::error_code ec;
   std::filesystem::path canonical_path = std::filesystem::weakly_canonical(executable_path, ec);
   return ec ? std::filesystem::path(executable_path) : canonical_path;
+#elif defined(__ANDROID__)
+  // /proc/self/exe is /system/bin/app_process64 for an app process. Runtime
+  // plugins (librexgpu-*.so) are packaged next to this library in the APK's
+  // native lib dir, so report this library's own path instead.
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<void*>(&GetExecutablePath), &info) && info.dli_fname) {
+    return std::filesystem::path(info.dli_fname);
+  }
+  return {};
 #else
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);

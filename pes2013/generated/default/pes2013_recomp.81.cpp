@@ -22903,11 +22903,12 @@ loc_82C48EDC:
 	return;
 }
 
+DECLARE_REX_FUNC(sub_82C4C440);
+// pes2013: the generated body was truncated (see manual_functions.toml for the real
+// extent); delegate to the full gapfill translation of the same guest function.
 DEFINE_REX_FUNC(diag_82C4C440) {
 	REX_FUNC_PROLOGUE();
-	// b 0x82c4b908
-	sub_82C4B908(ctx, base);
-	return;
+	sub_82C4C440(ctx, base);
 }
 
 DEFINE_REX_FUNC(sub_82C4C570) {

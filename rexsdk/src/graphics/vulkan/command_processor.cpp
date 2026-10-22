@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -24,9 +25,11 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ShaderLang.h>
 #include <rex/assert.h>
+#include <rex/diag/progress.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
+#include "shader_guard.h"
 #include <rex/math.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/flags.h>
@@ -68,6 +71,11 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
                     "device (falls back to render passes otherwise)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(shader_compile_timeout_ms, 20000, "GPU/Vulkan",
+                     "Max time for a runtime GLSL->SPIR-V compile before it is skipped (ms)")
+    .range(1000, 600000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex::graphics::vulkan {
 
@@ -775,7 +783,19 @@ bool VulkanCommandProcessor::CompileGlslToSpirv(VkShaderStageFlagBits stage,
       error_out = fmt::format("Unsupported Vulkan shader stage mask {}", uint32_t(stage));
       return false;
   }
-  return CompileGlslToSpirvInternal(glslang_stage, source, spirv_out, error_out);
+  static std::once_flag cache_dir_once;
+  std::call_once(cache_dir_once, []() {
+    const char* env = std::getenv("REX_SHADER_CACHE_DIR");
+    shader_guard::SetCacheDir(env ? env
+        : "/storage/emulated/0/Android/data/com.tokyogames.pes2013/files/shader_cache");
+  });
+  std::string source_copy(source);  // worker owns its data; safe if we time out
+  return shader_guard::CompileGuarded(
+      "glsl", source_copy,
+      [glslang_stage, source_copy](std::vector<uint32_t>& spv, std::string& err) {
+        return CompileGlslToSpirvInternal(glslang_stage, source_copy, spv, err);
+      },
+      spirv_out, error_out, uint32_t(REXCVAR_GET(shader_compile_timeout_ms)));
 }
 
 bool VulkanCommandProcessor::SetupContext() {
@@ -905,6 +925,7 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize shared memory");
     return false;
   }
+  REXGPU_INFO("[gpu] setup: shared memory ready");
 
   primitive_processor_ =
       std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
@@ -912,6 +933,7 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize the geometric primitive processor");
     return false;
   }
+  REXGPU_INFO("[gpu] setup: primitive processor ready");
 
   uint32_t shared_memory_binding_count_log2 =
       SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
@@ -939,10 +961,9 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
   if (!device_properties.vertexPipelineStoresAndAtomics) {
-    REXGPU_ERROR(
-        "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
-        "D3D12 parity, but unsupported by the selected device");
-    return false;
+    REXGPU_WARN(
+        "Vulkan vertexPipelineStoresAndAtomics is unsupported by the selected "
+        "device; draws using vertex shader memexport will be skipped");
   }
   if (!device_properties.geometryShader) {
     if (REXCVAR_GET(vulkan_require_geometry_shader)) {
@@ -976,6 +997,7 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize the render target cache");
     return false;
   }
+  REXGPU_INFO("[gpu] setup: render target cache ready");
 
   // Shared memory and EDRAM descriptor set layout.
   bool edram_fragment_shader_interlock =
@@ -1023,6 +1045,7 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize the graphics pipeline cache");
     return false;
   }
+  REXGPU_INFO("[gpu] setup: pipeline cache ready");
 
   // Requires the transient descriptor set layouts.
   texture_cache_ =
@@ -1032,6 +1055,7 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize the texture cache");
     return false;
   }
+  REXGPU_INFO("[gpu] setup: texture cache ready");
 
   // Shared memory and EDRAM common bindings.
   VkDescriptorPoolSize descriptor_pool_sizes[1];
@@ -1344,6 +1368,7 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
+  REXGPU_INFO("[gpu] setup: swap descriptor layouts/pool ready");
   // Swap descriptor set allocation.
   VkDescriptorSetAllocateInfo swap_descriptor_set_allocate_info;
   swap_descriptor_set_allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1565,6 +1590,7 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
+  REXGPU_INFO("[gpu] setup: before gamma ramp pipelines");
   // Gamma ramp application pipeline.
   // Using a graphics pipeline, not a compute one, because storage image support
   // is optional for VK_FORMAT_A2B10G10R10_UNORM_PACK32.
@@ -1777,6 +1803,7 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
+  REXGPU_INFO("[gpu] setup: before gamma ramp compute pipelines");
   // Gamma ramp application compute pipelines.
   swap_apply_gamma_compute_256_entry_table_pipeline_ = ui::vulkan::util::CreateComputePipeline(
       vulkan_device, swap_apply_gamma_compute_pipeline_layout_, shaders::apply_gamma_table_cs,
@@ -1897,11 +1924,13 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_WARN("Failed to create Vulkan resolve-downscale pipeline layout");
   }
 
+  REXGPU_INFO("[gpu] setup: before occlusion query resources");
   occlusion_query_resources_available_ = InitializeOcclusionQueryResources();
 
   // Just not to expose uninitialized memory.
   std::memset(&system_constants_, 0, sizeof(system_constants_));
 
+  REXGPU_INFO("[gpu] setup: SetupContext complete");
   return true;
 }
 
@@ -2281,6 +2310,13 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
+  {
+    uint64_t swap_n = rex::diag::counters().gpu_swaps.fetch_add(1, std::memory_order_relaxed);
+    if (swap_n < 5) {
+      REXGPU_INFO("[gpu] IssueSwap #{} frontbuffer={:#x} {}x{}", swap_n + 1, frontbuffer_ptr,
+                  frontbuffer_width, frontbuffer_height);
+    }
+  }
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
 
@@ -3641,9 +3677,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
   if (memexport_used_vertex) {
     if (!device_properties.vertexPipelineStoresAndAtomics) {
-      REXGPU_ERROR(
-          "Vertex shader memexport draw encountered without "
-          "vertexPipelineStoresAndAtomics support");
+      static std::atomic<uint32_t> skipped_vertex_memexport_draws{0};
+      uint32_t skipped = skipped_vertex_memexport_draws.fetch_add(1, std::memory_order_relaxed);
+      if (skipped < 8 || (skipped % 1000) == 0) {
+        REXGPU_ERROR(
+            "Vertex shader memexport draw skipped (no vertexPipelineStoresAndAtomics); "
+            "skipped so far: {}",
+            skipped + 1);
+      }
       return false;
     }
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);

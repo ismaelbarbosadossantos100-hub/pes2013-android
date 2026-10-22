@@ -18,6 +18,7 @@
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
+#include <rex/diag/progress.h>
 #include <rex/dbg.h>
 #include <rex/perf/counter.h>
 #include <rex/chrono/clock.h>
@@ -203,11 +204,19 @@ void CommandProcessor::WorkerThreadMain() {
     return;
   }
 
+  REXGPU_INFO("[gpu] worker loop start");
   while (worker_running_) {
     while (!pending_fns_.empty()) {
       auto fn = std::move(pending_fns_.front());
       pending_fns_.pop();
+      const auto fn_start = std::chrono::steady_clock::now();
       fn();
+      const auto fn_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - fn_start)
+                             .count();
+      if (fn_ms >= 100) {
+        REXGPU_INFO("[gpu] worker pending function took {} ms", static_cast<long long>(fn_ms));
+      }
     }
 
     uint32_t write_ptr_index = write_ptr_index_.load();
@@ -228,6 +237,7 @@ void CommandProcessor::WorkerThreadMain() {
 
         rex::thread::MaybeYield();
         loop_count++;
+        rex::diag::counters().gpu_idle_iters.fetch_add(1, std::memory_order_relaxed);
         write_ptr_index = write_ptr_index_.load();
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
@@ -663,6 +673,7 @@ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
 }
 
 bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
+  rex::diag::counters().packets.fetch_add(1, std::memory_order_relaxed);
   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
   const uint32_t packet_type = packet >> 30;
   if (packet == 0) {
@@ -1380,6 +1391,8 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
           xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
       draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
                                  is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
+      (draw_succeeded ? rex::diag::counters().draws_ok : rex::diag::counters().draws_fail)
+          .fetch_add(1, std::memory_order_relaxed);
       if (!draw_succeeded) {
         auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
         auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();

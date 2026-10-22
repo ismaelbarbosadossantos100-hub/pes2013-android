@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.25)
+# Native code is ALWAYS built optimized, even for Gradle's "debug" variant.
+# A Debug glslang/rexgpu-xenos made runtime shader compilation take minutes on Mali (black screen).
+# Must come BEFORE project(). Override with -DPES_NATIVE_DEBUG=ON for real native debugging.
+if(NOT PES_NATIVE_DEBUG)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+    set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+endif()
+
 project(pes2013_android LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -33,7 +42,7 @@ add_library(main SHARED
 )
 
 # SDLActivity loads libmain.so and invokes the SDL entry point.
-rexglue_setup_target(main)
+rexglue_setup_target(main GPU_PLUGINS xenos)
 
 target_include_directories(main PRIVATE
     "${PES2013_ROOT}"

@@ -13,7 +13,12 @@
  *              role as a function dispatch table rather than a CPU emulator.
  */
 
+#include <atomic>
+#include <mutex>
+#include <unordered_set>
+
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
@@ -34,9 +39,41 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 
 }  // namespace
 
+REXCVAR_DEFINE_BOOL(unregistered_call_skip, true, "Runtime",
+                    "Log and skip calls to unregistered guest functions (returns r3=0) instead of "
+                    "aborting, so every missing function shows up in one run")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
+  static std::mutex lock;
+  static std::unordered_set<uint32_t> seen;
+  static std::atomic<uint32_t> total_skips{0};
+  constexpr uint32_t kMaxSkips = 20000;  // runaway guard
+
+  const uint32_t target = ctx.last_indirect_target;
+  if (!REXCVAR_GET(unregistered_call_skip)) {
+    REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}", target);
+    return;
+  }
+  bool first;
+  size_t unique;
+  {
+    std::lock_guard<std::mutex> g(lock);
+    first = seen.insert(target).second;
+    unique = seen.size();
+  }
+  if (first) {
+    // Add each of these to pes2013/manual_functions.toml and re-run codegen.
+    REXLOG_ERROR("[unresolved] guest call to unregistered function 0x{:08X} (caller lr=0x{:08X}) "
+                 "- skipped, r3=0 (unique={})",
+                 target, uint32_t(ctx.lr), unique);
+  }
+  if (total_skips.fetch_add(1) + 1 > kMaxSkips) {
+    REX_FATAL("Too many skipped unregistered calls (last 0x{:08X}); see [unresolved] log lines",
+              target);
+    return;
+  }
+  ctx.r3.u64 = 0;  // behave like a function that returned 0
 }
 
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {

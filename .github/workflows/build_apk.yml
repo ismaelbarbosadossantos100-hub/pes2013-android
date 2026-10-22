@@ -2,7 +2,10 @@ name: Build PES 2013 Android APK
 
 on:
   push:
-    branches: [main]
+    branches: [android-clean-restart, fix/shader-guard]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   workflow_dispatch:
 
 jobs:
@@ -62,7 +65,7 @@ jobs:
             ninja-build python3 python3-pip \
             nasm yasm pkg-config \
             libvulkan-dev \
-            clang lld
+            clang lld ccache
 
       - name: Install CMake 3.28.3
         run: |
@@ -122,6 +125,9 @@ jobs:
           echo "All clones done."
           ls -la
 
+      - name: Patch glslang (createAccessChain)
+        run: python3 tools/patch_glslang.py rexsdk/thirdparty/glslang/SPIRV/SpvBuilder.cpp
+
       - name: Set workspace paths
         run: |
           echo "PES2013_ROOT=${{ github.workspace }}/pes2013"  >> $GITHUB_ENV
@@ -156,6 +162,14 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/**/gradle-wrapper.properties') }}
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
       - name: Build debug APK
         working-directory: ${{ github.workspace }}/android
         env:
@@ -165,35 +179,119 @@ jobs:
           PES2013_ROOT:     ${{ env.PES2013_ROOT }}
           REXSDK_DIR:       ${{ env.REXSDK_DIR }}
           GRADLE_OPTS:      "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx6g"
+          PES_USE_CCACHE:   "1"
+          CCACHE_DIR:       /home/runner/.cache/ccache
+          CCACHE_BASEDIR:   ${{ github.workspace }}
+          CCACHE_MAXSIZE:   "3G"
+          CCACHE_COMPRESS:  "1"
+          CCACHE_SLOPPINESS: "time_macros,pch_defines"
         run: |
           set -e
           set -o pipefail
+          ccache --zero-stats || true
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          ccache --show-stats || true
+
+      - name: Report build errors
+        if: failure()
+        working-directory: ${{ github.workspace }}/android
+        run: |
+          python3 - <<'PY' || true
+          import re, os
+          t = open('build.log', errors='replace').read().split('\n') if os.path.exists('build.log') else []
+          errs = [l for l in t if re.search(r'error:|undefined reference|FAILED|What went wrong|fatal error|ld.lld: error', l)]
+          msg = '\n'.join(errs[:25]) or '\n'.join(t[-25:])
+          msg = msg.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+          print('::error title=Build errors::' + msg[:6000])
+          PY
 
       - name: Find APK
-        if: always()
         id: find_apk
         run: |
-          APK=$(find "${{ github.workspace }}/android" -name "*.apk" 2>/dev/null | head -1)
-          if [ -n "$APK" ]; then
-            echo "path=$APK"  >> $GITHUB_OUTPUT
-            echo "found=true" >> $GITHUB_OUTPUT
-            ls -lh "$APK"
-          else
+          set -euo pipefail
+          APK=$(find "${{ github.workspace }}/android/app/build/outputs/apk" -name "*.apk" 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
             echo "found=false" >> $GITHUB_OUTPUT
-            echo "No APK produced."
+            echo "::error::Nenhum APK produzido"
+            exit 1
           fi
+          echo "path=$APK"  >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+          ls -lh "$APK"
+
+      - name: Gerar metadados e inspecionar APK
+        if: steps.find_apk.outputs.found == 'true'
+        id: meta
+        run: |
+          set -euo pipefail
+          APK="${{ steps.find_apk.outputs.path }}"
+          OUT="${{ github.workspace }}/artifact-out"
+          mkdir -p "$OUT"
+          cp "$APK" "$OUT/app-debug.apk"
+          cp "${{ github.workspace }}/android/build.log" "$OUT/build.log" || true
+          SHA=$(sha256sum "$OUT/app-debug.apk" | cut -d' ' -f1)
+          {
+            echo "commit=${{ github.sha }}"
+            echo "branch=${{ github.ref_name }}"
+            echo "run_number=${{ github.run_number }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "date_utc=$(date -u +%FT%TZ)"
+            echo "ndk=${{ env.NDK_VERSION }}"
+            echo "api=${{ env.ANDROID_API }}"
+            echo "size_bytes=$(stat -c %s "$OUT/app-debug.apk")"
+            echo "sha256=$SHA"
+          } > "$OUT/metadata.txt"
+          echo "--- conteúdo do APK (dex e libs nativas)"
+          unzip -l "$OUT/app-debug.apk" | grep -E "classes[0-9]*\.dex|\.so$" | tee "$OUT/apk_contents.txt"
+          echo "--- ABIs"
+          unzip -Z1 "$OUT/app-debug.apk" | grep '^lib/' | cut -d/ -f2 | sort -u | tee "$OUT/apk_abis.txt"
+          echo "--- assinatura JNI nativeSetupJNI no DEX"
+          BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          mkdir -p /tmp/dex && unzip -q -o "$OUT/app-debug.apk" 'classes*.dex' -d /tmp/dex
+          for d in /tmp/dex/classes*.dex; do
+            "$BT/dexdump" -d "$d" 2>/dev/null | grep -A0 "nativeSetupJNI" | head -3 || true
+          done | tee "$OUT/dex_nativeSetupJNI.txt"
+          cat "$OUT/metadata.txt"
+          echo "--- símbolos exportados nas libs arm64"
+          NM=$(find "$ANDROID_SDK_ROOT" -name llvm-nm -path '*linux-x86_64*' 2>/dev/null | head -1 || true)
+          mkdir -p /tmp/libs && unzip -q -o "$OUT/app-debug.apk" 'lib/arm64-v8a/*' -d /tmp/libs || true
+          {
+            echo "nm=$NM"
+            for f in /tmp/libs/lib/arm64-v8a/*.so; do
+              [ -e "$f" ] || continue
+              echo "$(basename "$f") size=$(stat -c %s "$f") sha256=$(sha256sum "$f" | cut -c1-16)"
+            done
+            if [ -n "$NM" ]; then
+              echo "libmain SDL_main/main: $("$NM" -D --defined-only /tmp/libs/lib/arm64-v8a/libmain.so 2>/dev/null | grep -E ' (SDL_main|main)$' | tr '\n' ';')"
+              for g in /tmp/libs/lib/arm64-v8a/librexgpu-xenos*.so; do
+                [ -e "$g" ] && echo "$(basename "$g") exports: $("$NM" -D --defined-only "$g" 2>/dev/null | grep -E 'rex_gpu_(abi_version|create)' | tr '\n' ';')"
+              done
+            fi
+          } > "$OUT/native_symbols.txt" 2>&1 || true
+          cat "$OUT/native_symbols.txt"
+          python3 - "$OUT" <<'PY' || true
+          import sys,os
+          o=sys.argv[1]
+          t=""
+          for n in ("metadata.txt","apk_abis.txt","dex_nativeSetupJNI.txt","native_symbols.txt","apk_contents.txt"):
+              f=os.path.join(o,n)
+              if os.path.exists(f):
+                  t+="## "+n+"\n"+open(f,errors="replace").read()+"\n"
+          t=t[:30000].replace("%","%25").replace("\r","").replace("\n","%0A")
+          print("::notice title=APK report::"+t)
+          PY
+          echo "dir=$OUT" >> $GITHUB_OUTPUT
 
       - name: Upload APK artifact
         if: steps.find_apk.outputs.found == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: pes2013-debug-apk-build${{ github.run_number }}
-          path: ${{ steps.find_apk.outputs.path }}
+          name: pes2013-debug-apk-build${{ github.run_number }}-${{ github.sha }}
+          path: ${{ steps.meta.outputs.dir }}
           retention-days: 60
 
-      - name: Upload build log (on failure)
-        if: failure()
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-${{ github.run_number }}
@@ -203,7 +301,7 @@ jobs:
             ${{ github.workspace }}/android/app/build/intermediates/cmake/**
 
       - name: Create GitHub Release
-        if: steps.find_apk.outputs.found == 'true'
+        if: steps.find_apk.outputs.found == 'true' && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
@@ -226,7 +324,7 @@ jobs:
             - GPU: Mali-G57 MC2
             - ABI: arm64-v8a
             - Android mínimo: 8.0 (API 26)
-          files: ${{ steps.find_apk.outputs.path }}
+          files: ${{ steps.meta.outputs.dir }}/app-debug.apk
           draft: false
           prerelease: true
         env:

@@ -201,4 +201,14 @@ int main(int argc, char* argv[]) {
   return RunWindowedApp(argc, argv);
 }
 
+#if defined(__ANDROID__)
+// SDL3's SDLActivity (nativeRunMain) resolves the entry point with
+// dlsym("SDL_main") in libmain.so. Without this symbol the activity logs
+// "Couldn't find function SDL_main" and finishes immediately.
+extern "C" __attribute__((visibility("default"))) int SDL_main(int argc,
+                                                                char* argv[]) {
+  return RunWindowedApp(argc, argv);
+}
+#endif
+
 #endif

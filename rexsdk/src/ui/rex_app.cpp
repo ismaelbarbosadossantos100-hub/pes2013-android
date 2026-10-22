@@ -10,6 +10,26 @@
  */
 
 #include <rex/rex_app.h>
+#include <rex/diag/progress.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <string>
+#include <thread>
+#include <vector>
+#if defined(__linux__)
+#include <cxxabi.h>
+#include <dirent.h>
+#include <dlfcn.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <unwind.h>
+#endif
 
 #include <cstdlib>
 
@@ -93,7 +113,181 @@ system::AchievementManager& ReXApp::achievements() const {
   return runtime_->kernel_state()->achievements();
 }
 
+
+#if defined(__linux__)
+// Periodic progress log: tells apart "guest/GPU make progress" from "idle or
+// stuck" when the screen stays black. Reads only /proc and atomic counters.
+// Stack sampling of threads that stay CPU-bound: the heartbeat sends a realtime
+// signal to a hot thread; the handler records the return addresses and the
+// heartbeat resolves them with dladdr. Diagnostic only (max 3 samples/thread).
+static void* g_bt_frames[48];
+static std::atomic<int> g_bt_count{0};
+static std::atomic<int> g_bt_state{0};  // 0 idle, 1 requested, 2 ready
+
+static _Unwind_Reason_Code BtCallback(struct _Unwind_Context* ctx, void*) {
+  const int n = g_bt_count.load(std::memory_order_relaxed);
+  if (n >= 48) return _URC_END_OF_STACK;
+  const uintptr_t ip = _Unwind_GetIP(ctx);
+  if (ip) {
+    g_bt_frames[n] = reinterpret_cast<void*>(ip);
+    g_bt_count.store(n + 1, std::memory_order_relaxed);
+  }
+  return _URC_NO_REASON;
+}
+
+static void BtSignalHandler(int, siginfo_t*, void*) {
+  if (g_bt_state.load(std::memory_order_acquire) != 1) return;
+  g_bt_count.store(0, std::memory_order_relaxed);
+  _Unwind_Backtrace(BtCallback, nullptr);
+  g_bt_state.store(2, std::memory_order_release);
+}
+
+static void SampleThreadStack(int tid, const std::string& name, int k) {
+  using namespace std::chrono_literals;
+  g_bt_count.store(0);
+  g_bt_state.store(1, std::memory_order_release);
+  if (syscall(SYS_tgkill, getpid(), tid, SIGRTMIN + 2) != 0) {
+    g_bt_state.store(0);
+    return;
+  }
+  for (int w = 0; w < 40 && g_bt_state.load(std::memory_order_acquire) != 2; ++w) {
+    std::this_thread::sleep_for(10ms);
+  }
+  if (g_bt_state.load(std::memory_order_acquire) != 2) {
+    g_bt_state.store(0);
+    REXLOG_WARN("[bt] {}#{} sample {} timed out", name, tid, k);
+    return;
+  }
+  const int n = g_bt_count.load();
+  std::string out;
+  for (int f = 0; f < n && f < 30; ++f) {
+    Dl_info info{};
+    const char* lib = "?";
+    std::string sym;
+    uintptr_t off = 0;
+    void* addr = g_bt_frames[f];
+    if (dladdr(addr, &info) && info.dli_fname) {
+      const char* slash = strrchr(info.dli_fname, '/');
+      lib = slash ? slash + 1 : info.dli_fname;
+      if (info.dli_sname) {
+        int st = 0;
+        char* dm = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &st);
+        sym = (st == 0 && dm) ? dm : info.dli_sname;
+        free(dm);
+        if (sym.size() > 90) sym.resize(90);
+        off = reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(info.dli_saddr);
+      } else {
+        off = reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(info.dli_fbase);
+      }
+    }
+    char tail[40];
+    snprintf(tail, sizeof(tail), "+0x%lx", static_cast<unsigned long>(off));
+    out += "#" + std::to_string(f) + " " + lib + "!" + (sym.empty() ? "?" : sym) + tail + " | ";
+  }
+  g_bt_state.store(0);
+  REXLOG_INFO("[bt] {}#{} sample {}: {}", name, tid, k, out);
+}
+
+static void ProgressHeartbeatMain() {
+  using namespace std::chrono_literals;
+  const long clk = sysconf(_SC_CLK_TCK) > 0 ? sysconf(_SC_CLK_TCK) : 100;
+  std::map<int, uint64_t> prev;
+  std::map<int, int> busy_streak, sample_count;
+  std::map<int, uint32_t> last_sample_iter;
+  const auto start = std::chrono::steady_clock::now();
+  for (uint32_t i = 0;; ++i) {
+    std::this_thread::sleep_for(i < 36 ? 5s : 30s);
+    struct Task {
+      std::string name;
+      int tid;
+      uint64_t delta;
+    };
+    std::vector<Task> tasks;
+    if (DIR* d = opendir("/proc/self/task")) {
+      while (dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        const int tid = atoi(e->d_name);
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+        FILE* f = fopen(path, "r");
+        if (!f) continue;
+        char buf[1024];
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = 0;
+        char* lp = strchr(buf, '(');
+        char* rp = strrchr(buf, ')');
+        if (!lp || !rp || rp < lp) continue;
+        unsigned long ut = 0, st = 0;
+        char state = '?';
+        sscanf(rp + 2, "%c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &state, &ut, &st);
+        const uint64_t ticks = ut + st;
+        const uint64_t before = prev.count(tid) ? prev[tid] : 0;
+        prev[tid] = ticks;
+        tasks.push_back({std::string(lp + 1, rp), tid, ticks >= before ? ticks - before : 0});
+      }
+      closedir(d);
+    }
+    std::sort(tasks.begin(), tasks.end(),
+              [](const Task& a, const Task& b) { return a.delta > b.delta; });
+    {
+      const uint64_t window_ms = i < 36 ? 5000 : 30000;
+      for (const Task& t : tasks) {
+        const bool hot = t.delta * 1000 / static_cast<uint64_t>(clk) >= window_ms * 8 / 10;
+        busy_streak[t.tid] = hot ? busy_streak[t.tid] + 1 : 0;
+        if (busy_streak[t.tid] >= 2 && sample_count[t.tid] < 3 &&
+            (sample_count[t.tid] == 0 || i - last_sample_iter[t.tid] >= 2)) {
+          last_sample_iter[t.tid] = i;
+          SampleThreadStack(t.tid, t.name, ++sample_count[t.tid]);
+        }
+      }
+    }
+    std::string busy;
+    for (size_t k = 0; k < tasks.size() && k < 5 && tasks[k].delta > 0; ++k) {
+      if (!busy.empty()) busy += ", ";
+      busy += tasks[k].name + "#" + std::to_string(tasks[k].tid) + ":+" +
+              std::to_string(tasks[k].delta * 1000 / static_cast<uint64_t>(clk)) + "ms";
+    }
+    unsigned long rss_pages = 0;
+    if (FILE* f = fopen("/proc/self/statm", "r")) {
+      unsigned long size = 0;
+      if (fscanf(f, "%lu %lu", &size, &rss_pages) != 2) rss_pages = 0;
+      fclose(f);
+    }
+    auto& c = rex::diag::counters();
+    const auto secs =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start)
+            .count();
+    REXLOG_INFO(
+        "[hb] t={}s threads={} rss={}MB pk={} draw_ok={} draw_fail={} gpu_swap={} vd_swap={} "
+        "irq={} opens={} gpu_idle={} busy=[{}]",
+        static_cast<long long>(secs), tasks.size(),
+        static_cast<unsigned long>(rss_pages * 4096UL / (1024UL * 1024UL)),
+        c.packets.load(std::memory_order_relaxed), c.draws_ok.load(std::memory_order_relaxed),
+        c.draws_fail.load(std::memory_order_relaxed), c.gpu_swaps.load(std::memory_order_relaxed),
+        c.vd_swaps.load(std::memory_order_relaxed), c.interrupts.load(std::memory_order_relaxed),
+        c.file_opens.load(std::memory_order_relaxed),
+        c.gpu_idle_iters.load(std::memory_order_relaxed), busy);
+  }
+}
+#endif
+
+static void StartProgressHeartbeat() {
+#if defined(__linux__)
+  static std::atomic<bool> started{false};
+  if (started.exchange(true)) return;
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = BtSignalHandler;
+  sa.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGRTMIN + 2, &sa, nullptr);
+  std::thread(ProgressHeartbeatMain).detach();
+#endif
+}
+
 bool ReXApp::OnInitialize() {
+  REXLOG_INFO("[stage] OnInitialize begin");
 #if REX_PLATFORM_ANDROID
   rex::memory::AndroidInitialize();
   rex::thread::AndroidInitialize();
@@ -248,11 +442,14 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     runtime_->set_imgui_drawer(imgui_drawer_.get());
   }
 
+  REXLOG_INFO("[stage] Runtime::Setup begin");
   auto status = runtime_->Setup(ppc_info_, std::move(config_));
   if (XFAILED(status)) {
     REXLOG_ERROR("Runtime setup failed: {:08X}", status);
     return false;
   }
+
+  REXLOG_INFO("[stage] Runtime::Setup ok");
 
   if (window_ && runtime_->input_system()) {
     static_cast<rex::input::InputSystem*>(runtime_->input_system())->AttachWindow(window_.get());
@@ -297,6 +494,7 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     }
   }
 
+  REXLOG_INFO("[stage] LoadXexImage {}", xex_image);
   status = runtime_->LoadXexImage(xex_image);
   if (XFAILED(status)) {
     auto msg = fmt::format("Failed to load XEX ({}): {:08X}", xex_image, status);
@@ -305,6 +503,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     return false;
   }
 
+  REXLOG_INFO("[stage] XEX loaded");
+  StartProgressHeartbeat();
   OnPostLoadXexImage();
 
   if (ppc_info_.rexcrt_heap) {
@@ -326,6 +526,7 @@ bool ReXApp::SetupPresentation() {
   config_.kernel_init = rex::kernel::InitializeKernel;
 
   OnPreSetup(config_);
+  REXLOG_INFO("[stage] OnPreSetup done, gpu_plugin='{}'", config_.gpu_plugin);
 
   if (!config_.graphics && !config_.gpu_plugin.empty()) {
     config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin);
@@ -339,12 +540,17 @@ bool ReXApp::SetupPresentation() {
     }
   }
 
+  if (!config_.graphics) {
+    REXLOG_WARN("[stage] no graphics system: detached mode, no presenter (black screen)");
+  }
   if (config_.graphics) {
+    REXLOG_INFO("[stage] GPU plugin loaded, SetupPresentation");
     X_STATUS status = config_.graphics->SetupPresentation(&app_context());
     if (XFAILED(status)) {
       REXLOG_ERROR("Graphics presentation setup failed: {:08X}", status);
       return false;
     }
+    REXLOG_INFO("[stage] graphics SetupPresentation ok");
   }
 
   // Create window
@@ -353,6 +559,8 @@ bool ReXApp::SetupPresentation() {
     REXLOG_ERROR("Failed to create window");
     return false;
   }
+
+  REXLOG_INFO("[stage] window created");
 
   // Set window title with SDK build stamp
   std::string title = std::string(GetName()) + " " + REXGLUE_BUILD_TITLE;
@@ -475,12 +683,17 @@ void ReXApp::LaunchModule() {
       uint32_t title_id = runtime_->kernel_state()->title_id();
       if (title_id != 0) {
         REXLOG_INFO("Initializing shader storage for title {:08X}...", title_id);
-        graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id, true);
+        // Non-blocking: the guest must not wait for the GPU thread to finish loading
+        // stored pipelines (nothing to load on first run; on mobile a long blocking
+        // load would also hide whether the guest ever starts).
+        graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id, false);
       }
     }
 
     OnPostLaunchModule(main_thread.get());
+    REXLOG_INFO("[stage] resuming guest main thread '{}'", main_thread->name());
     main_thread->Resume();
+    REXLOG_INFO("[stage] guest main thread resumed");
 
     module_thread_ = std::thread([this, main_thread = std::move(main_thread)]() mutable {
       main_thread->Wait(0, 0, 0, nullptr);

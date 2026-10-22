@@ -1,9 +1,13 @@
 package org.libsdl.app;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
@@ -21,9 +25,6 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -31,6 +32,8 @@ public final class LauncherActivity extends Activity {
     private static final int REQUEST_GAME_FOLDER = 4101;
     private static final String PREFS = "pes2013_launcher";
     private static final String GAME_PATH = "game_path";
+    private static final String PICKED_PATH = "picked_path";
+    private static final int REQUEST_STORAGE = 4102;
     private static final String CHANNEL_URL = "https://youtube.com/@shisui-bahiano?si=O5-QfhdS449-ReXz";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -170,69 +173,85 @@ public final class LauncherActivity extends Activity {
         importFolder(tree);
     }
 
+    /** Usa a pasta escolhida diretamente (sem copiar). Exige acesso a todos os arquivos. */
     private void importFolder(Uri tree) {
-        SessionLogger.log(this, "IMPORT_START uri=" + tree);
-        playButton.setEnabled(false);
+        SessionLogger.log(this, "FOLDER_PICKED uri=" + tree);
+        File dir = resolveTreePath(DocumentsContract.getTreeDocumentId(tree));
+        if (dir == null) {
+            status.setText("Não foi possível obter o caminho real da pasta.\nEscolha uma pasta do armazenamento interno ou do cartão SD.");
+            playButton.setEnabled(false);
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PICKED_PATH, dir.getAbsolutePath()).apply();
+        scanPickedFolder();
+    }
+
+    private boolean hasStorageAccess() {
+        if (Build.VERSION.SDK_INT >= 30) return Environment.isExternalStorageManager();
+        return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestStorageAccess() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            try { startActivity(intent); }
+            catch (Exception e) { startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }
+        } else {
+            requestPermissions(new String[] { Manifest.permission.READ_EXTERNAL_STORAGE }, REQUEST_STORAGE);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results);
+        scanPickedFolder();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (status != null) scanPickedFolder();
+    }
+
+    /** Procura default.xex na pasta escolhida (até 4 níveis) e grava a raiz do jogo. */
+    private void scanPickedFolder() {
+        String picked = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PICKED_PATH, null);
+        if (picked == null) { refreshState(); return; }
+        if (!hasStorageAccess()) {
+            playButton.setEnabled(false);
+            status.setText("Pasta escolhida:\n" + picked + "\n\nConceda \"Acesso a todos os arquivos\" ao app para ler o jogo direto da pasta.");
+            requestStorageAccess();
+            return;
+        }
         progress.setVisibility(View.VISIBLE);
-        status.setText("Copiando a pasta privada do app...\nIsso pode levar alguns minutos.");
         executor.execute(() -> {
-            File destination = new File(getExternalFilesDir(null), "game_data");
-            try {
-                deleteChildren(destination);
-                if (!destination.mkdirs() && !destination.isDirectory()) throw new IOException("Não foi possível criar a pasta do jogo");
-                copyChildren(tree, DocumentsContract.getTreeDocumentId(tree), destination);
-                File gameRoot = findGameRoot(destination, 0);
+            File gameRoot = findGameRoot(new File(picked), 0);
+            runOnUiThread(() -> {
+                progress.setVisibility(View.GONE);
                 if (gameRoot == null) {
-                    throw new IOException("default.xex não encontrado na pasta selecionada");
-                }
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(GAME_PATH, gameRoot.getAbsolutePath()).apply();
-                SessionLogger.log(this, "IMPORT_READY gameRoot=" + gameRoot.getAbsolutePath());
-                runOnUiThread(() -> { progress.setVisibility(View.GONE); refreshState(); });
-            } catch (Exception error) {
-                SessionLogger.append(error);
-                runOnUiThread(() -> {
-                    progress.setVisibility(View.GONE);
-                    status.setText("Falha ao importar a pasta:\n" + error.getMessage());
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(GAME_PATH).apply();
+                    SessionLogger.log(this, "XEX_NOT_FOUND picked=" + picked);
+                    status.setText("default.xex não encontrado em:\n" + picked);
                     playButton.setEnabled(false);
-                });
-            }
+                } else {
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(GAME_PATH, gameRoot.getAbsolutePath()).apply();
+                    SessionLogger.log(this, "GAME_ROOT_READY gameRoot=" + gameRoot.getAbsolutePath());
+                    refreshState();
+                }
+            });
         });
     }
 
-    private void copyChildren(Uri tree, String parentId, File destination) throws IOException {
-        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId);
-        String[] projection = { DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE };
-        try (Cursor cursor = getContentResolver().query(children, projection, null, null, null)) {
-            if (cursor == null) throw new IOException("Não foi possível ler a pasta selecionada");
-            while (cursor.moveToNext()) {
-                String id = cursor.getString(0);
-                String name = cursor.getString(1);
-                String mime = cursor.getString(2);
-                if (name == null || name.isEmpty()) name = id;
-                File output = new File(destination, safeName(name));
-                Uri document = DocumentsContract.buildDocumentUriUsingTree(tree, id);
-                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
-                    if (!output.mkdirs() && !output.isDirectory()) throw new IOException("Falha criando " + output);
-                    copyChildren(tree, id, output);
-                } else {
-                    copyFile(document, output);
-                }
-            }
-        }
-    }
-
-    private void copyFile(Uri source, File output) throws IOException {
-        File parent = output.getParentFile();
-        if (parent != null) parent.mkdirs();
-        try (InputStream input = getContentResolver().openInputStream(source);
-             FileOutputStream out = new FileOutputStream(output)) {
-            if (input == null) throw new IOException("Não foi possível abrir " + source);
-            byte[] buffer = new byte[1024 * 1024];
-            int count;
-            while ((count = input.read(buffer)) != -1) out.write(buffer, 0, count);
-        }
+    /** Converte o id de documento SAF ("primary:Pasta/Jogo" ou "XXXX-XXXX:Pasta") em caminho POSIX. */
+    private File resolveTreePath(String docId) {
+        int colon = docId.indexOf(':');
+        if (colon < 0) return null;
+        String volume = docId.substring(0, colon);
+        String rel = docId.substring(colon + 1);
+        File base = volume.equalsIgnoreCase("primary")
+                ? Environment.getExternalStorageDirectory()
+                : new File("/storage/" + volume);
+        return rel.isEmpty() ? base : new File(base, rel);
     }
 
     private File findGameRoot(File directory, int depth) {
@@ -249,20 +268,6 @@ public final class LauncherActivity extends Activity {
             }
         }
         return null;
-    }
-
-    private String safeName(String name) {
-        return name.replace('/', '_').replace('\\', '_');
-    }
-
-    private void deleteChildren(File directory) {
-        if (!directory.exists()) return;
-        File[] children = directory.listFiles();
-        if (children != null) for (File child : children) {
-            if (child.isDirectory()) deleteChildren(child);
-            child.delete();
-        }
-        directory.delete();
     }
 
     private void launchGame() {

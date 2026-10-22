@@ -2,7 +2,7 @@ name: Build PES 2013 Android APK
 
 on:
   push:
-    branches: [android-clean-restart, fix/shader-guard]
+    branches: [android-clean-restart, fix/shader-guard, port-pes13-mobile]
     paths-ignore:
       - 'docs/**'
       - '**.md'

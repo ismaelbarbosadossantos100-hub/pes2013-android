@@ -191,6 +191,7 @@ class VulkanDevice {
     bool ext_1_1_KHR_bind_memory2 = false;              // #158
     bool ext_1_2_KHR_spirv_1_4 = false;                 // #237
     bool ext_EXT_memory_budget = false;                 // #238
+    bool ext_EXT_external_memory_host = false;          // #180
     // Has optional features not implied by this being true.
     bool ext_EXT_custom_border_color = false;
     // Has optional features not implied by this being true.

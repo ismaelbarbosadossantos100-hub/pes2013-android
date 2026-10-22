@@ -195,6 +195,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (get_physical_device_properties2_supported) {
     // #238.
     XE_UI_VULKAN_STRUCT_EXTENSION(EXT_memory_budget)
+    // #180. Lets the shared memory buffer be backed by the guest's own physical memory pages
+    // (no second 512 MB copy on unified-memory GPUs such as Mali).
+    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_external_memory_host)
   }
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
     // #414.

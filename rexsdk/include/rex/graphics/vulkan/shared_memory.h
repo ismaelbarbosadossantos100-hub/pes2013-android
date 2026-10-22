@@ -63,7 +63,12 @@ class VulkanSharedMemory : public SharedMemory {
   VkPipelineStageFlags guest_shader_pipeline_stages_;
 
   VkBuffer buffer_ = VK_NULL_HANDLE;
+  // Backs buffer_ with the guest's own physical memory pages. Returns false, having left buffer_
+  // null, whenever the driver will not take them; the caller then creates an ordinary buffer.
+  bool TryCreateImportedBuffer();
   uint32_t buffer_memory_type_;
+  // True when buffer_ is the guest's physical memory itself: nothing to upload.
+  bool buffer_aliases_guest_memory_ = false;
   // Single for non-sparse, every allocation so far for sparse.
   std::vector<VkDeviceMemory> buffer_memory_;
 

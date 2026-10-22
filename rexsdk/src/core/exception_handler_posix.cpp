@@ -19,6 +19,7 @@
 
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 
+#include <dlfcn.h>
 #include <signal.h>
 
 #include <cstdint>
@@ -48,6 +49,82 @@ constexpr size_t kMaxHandlerCount = 8;
 // All custom handlers, left-aligned and null terminated.
 // Executed in order.
 std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
+
+namespace {
+
+// A SIGSEGV/SIGILL handler that merely returns re-executes the faulting instruction. When no
+// registered handler claims the fault (e.g. a guest read through a NULL pointer), the same
+// instruction faults again forever: the thread livelocks at ~70k faults/s with zero progress
+// (seen as a frozen splash screen). Detect that streak, report WHERE it happened, and give the
+// signal back to the previous owner (debuggerd/ART on Android) so the process terminates with
+// a normal crash report instead of hanging.
+constexpr uint32_t kUnhandledFaultLivelockThreshold = 4;
+
+struct FaultStreak {
+  uint64_t pc;
+  uint64_t addr;
+  uint32_t count;
+};
+thread_local FaultStreak fault_streak_ = {};
+thread_local bool in_fault_report_ = false;
+
+// Recompiled guest functions are exported as `sub_XXXXXXXX` (guest address in hex), so dladdr
+// turns a host PC straight into the guest function.
+void LogFaultFrame(const char* label, uint64_t pc) {
+  Dl_info info;
+  std::memset(&info, 0, sizeof(info));
+  if (pc && dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_sname) {
+    const uint64_t offset = pc - reinterpret_cast<uint64_t>(info.dli_saddr);
+    uint32_t guest = 0;
+    if (std::strncmp(info.dli_sname, "sub_", 4) == 0) {
+      guest = static_cast<uint32_t>(std::strtoul(info.dli_sname + 4, nullptr, 16));
+    }
+    if (guest) {
+      REXLOG_ERROR("[fault] {} host_pc=0x{:016X} {}+0x{:X} (guest function 0x{:08X})", label, pc,
+                   info.dli_sname, offset, guest);
+    } else {
+      REXLOG_ERROR("[fault] {} host_pc=0x{:016X} {}+0x{:X}", label, pc, info.dli_sname, offset);
+    }
+  } else {
+    REXLOG_ERROR("[fault] {} host_pc=0x{:016X} (no symbol)", label, pc);
+  }
+}
+
+void ReportUnhandledFault(int signal_number, uint64_t pc, uint64_t fault_addr, uint64_t lr,
+                          uint64_t fp, uint64_t sp, uint32_t repeats) {
+  REXLOG_ERROR(
+      "[fault] UNHANDLED {} at host address 0x{:016X} repeated {} times on the same instruction; "
+      "giving the signal back to the previous handler",
+      signal_number == SIGILL ? "SIGILL" : "SIGSEGV", fault_addr, repeats);
+  LogFaultFrame("pc ", pc);
+  if (lr) {
+    LogFaultFrame("lr ", lr);
+  }
+  // Walk the frame-pointer chain ({prev_fp, return_address} at [fp] on both ARM64 and x86-64),
+  // with strict bounds so the walk itself can never fault.
+  constexpr int kMaxFrames = 24;
+  constexpr uint64_t kMaxStackSpan = 64ull << 20;
+  for (int i = 0; i < kMaxFrames; ++i) {
+    if (!fp || (fp & 0xF) || fp < sp || fp - sp > kMaxStackSpan) {
+      break;
+    }
+    const uint64_t* frame = reinterpret_cast<const uint64_t*>(fp);
+    const uint64_t next_fp = frame[0];
+    const uint64_t return_address = frame[1];
+    if (!return_address) {
+      break;
+    }
+    char label[16];
+    std::snprintf(label, sizeof(label), "frame#%d", i);
+    LogFaultFrame(label, return_address);
+    if (next_fp <= fp) {
+      break;
+    }
+    fp = next_fp;
+  }
+}
+
+}  // namespace
 
 static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                      void* signal_context) {
@@ -417,6 +494,44 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+#if !REX_PLATFORM_MAC
+  // No registered handler claimed this fault. Returning now would re-run the faulting
+  // instruction; break the livelock once the same instruction/address keeps faulting.
+  {
+#if REX_ARCH_ARM64
+    const uint64_t fault_pc = mcontext.pc;
+    const uint64_t fault_lr = mcontext.regs[30];
+    const uint64_t fault_fp = mcontext.regs[29];
+    const uint64_t fault_sp = mcontext.sp;
+#elif REX_ARCH_AMD64
+    const uint64_t fault_pc = uint64_t(mcontext.gregs[REG_RIP]);
+    const uint64_t fault_lr = 0;
+    const uint64_t fault_fp = uint64_t(mcontext.gregs[REG_RBP]);
+    const uint64_t fault_sp = uint64_t(mcontext.gregs[REG_RSP]);
+#else
+    const uint64_t fault_pc = 0, fault_lr = 0, fault_fp = 0, fault_sp = 0;
+#endif
+    const uint64_t fault_addr = reinterpret_cast<uint64_t>(signal_info->si_addr);
+    FaultStreak& streak = fault_streak_;
+    if (streak.pc == fault_pc && streak.addr == fault_addr) {
+      ++streak.count;
+    } else {
+      streak.pc = fault_pc;
+      streak.addr = fault_addr;
+      streak.count = 1;
+    }
+    if (streak.count >= kUnhandledFaultLivelockThreshold && !in_fault_report_) {
+      in_fault_report_ = true;
+      ReportUnhandledFault(signal_number, fault_pc, fault_addr, fault_lr, fault_fp, fault_sp,
+                           streak.count);
+      const struct sigaction& previous =
+          (signal_number == SIGILL) ? original_sigill_handler_ : original_sigsegv_handler_;
+      // After this the retried instruction faults into the previous owner (tombstone/crash).
+      sigaction(signal_number, &previous, nullptr);
+    }
+  }
+#endif  // !REX_PLATFORM_MAC
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
